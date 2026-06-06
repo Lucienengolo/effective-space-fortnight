@@ -2,7 +2,7 @@
 css.py — All global CSS styles for the E-KYC Verification app.
 Inject with: st.markdown(get_styles(), unsafe_allow_html=True)
 """
-
+# Return the full page stylesheet as a single HTML string for Streamlit
 
 def get_styles() -> str:
     return """

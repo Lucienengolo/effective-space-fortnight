@@ -9,15 +9,18 @@ AI Stack:
   • UI Framework           → Streamlit
 """
 
+# Standard library imports
 import time
 import re
 from io import BytesIO
 import base64
 
+# Third-party libraries
 import streamlit as st
 from PIL import Image
 import numpy as np
 
+# OpenCV is optional; only required for face embedding extraction.
 try:
     import cv2
     CV2_OK = True
@@ -116,6 +119,7 @@ def _parse_fields_from_text(raw: str) -> dict:
     Heuristic field parser: scan raw OCR text for common ID document patterns.
     Returns a dict matching the expected KYC schema.
     """
+    # Normalize the OCR output and keep meaningful lines for parsing.
     lines = [l.strip() for l in raw.splitlines() if l.strip()]
     text  = raw.upper()
 
@@ -198,12 +202,12 @@ def _get_embedding(app, pil_img: Image.Image):
     """
     if not CV2_OK:
         raise RuntimeError("opencv-python-headless is not installed.")
-    # InsightFace expects BGR numpy array (OpenCV convention)
+    # InsightFace expects BGR numpy array (OpenCV convention).
     bgr = cv2.cvtColor(np.array(pil_img.convert("RGB")), cv2.COLOR_RGB2BGR)
     faces = app.get(bgr)
     if not faces:
         return None
-    # Pick the face with the largest bounding box area
+    # Select the biggest detected face to avoid picking small background faces.
     largest = max(faces, key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]))
     return largest.embedding
 
@@ -250,10 +254,11 @@ def compare_faces(doc_img: Image.Image, live_img: Image.Image) -> dict:
         }
 
     THRESHOLD  = 0.40
+    # Cosine similarity range is [-1, 1]. A higher value means closer face embeddings.
     cos_sim    = _cosine_similarity(doc_emb, live_emb)
     verified   = cos_sim >= THRESHOLD
 
-    # Normalise cosine similarity (−1…1) → score (0…100)
+    # Normalize cosine similarity (−1…1) → score (0…100) for UI display.
     similarity = max(0, min(100, round((cos_sim + 1) / 2 * 100)))
 
     if similarity >= 70:   confidence = "High"
@@ -387,3 +392,28 @@ def render_verdict(match: dict):
             {liveness_html}
         </div>
         """, unsafe_allow_html=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PRESENTATION SUMMARY
+# ─────────────────────────────────────────────────────────────────────────────
+# This file is structured into three main sections:
+#
+# 1) Utilities
+# #   - Image conversion helpers for PIL/base64 interchange.
+# #   - A session audit logger for timestamped KYC events.
+#
+# 2) AI pipeline functionality
+# #   - OCR: Use HuggingFace TrOCR first, fall back to pytesseract if needed.
+# #   - Document parsing: extract fields such as name, document type, dates, and MRZ.
+# #   - Face verification: load InsightFace ArcFace, compute embeddings, compare faces.
+#
+# 3) UI render helpers
+# #   - Build Streamlit components for the page header, stepper, field cards, log timeline, and verdict banners.
+#
+# Global flow summary:
+#   Upload a document image -> extract text fields -> capture a selfie -> compare face embeddings -> display verification results.
+#
+# The entire module supports a privacy-first local KYC experience by keeping all AI processing on-device.
+
+

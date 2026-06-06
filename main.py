@@ -1,20 +1,26 @@
 """
 main.py — E-KYC Identity Verification System
 ─────────────────────────────────────────────
-AI Stack:
-  • 🧠 Hugging Face (TrOCR)  → OCR / document text extraction
-  • 👤 DeepFace              → local biometric face verification
-  • 🎨 Streamlit             → UI
+This app performs on-device identity verification by:
+  • extracting text from uploaded identity documents with HuggingFace TrOCR,
+  • capturing a live selfie using Streamlit camera input,
+  • comparing the document face and live selfie using DeepFace.
 
-Run:
-    streamlit run main.py
+Tools used:
+  • Streamlit for UI and camera capture
+  • Pillow for image handling
+  • DeepFace for local face matching
+  • HuggingFace Transformers (TrOCR) for OCR
+  • PyTorch as the ML backend
+  • Tesseract OCR support via pytesseract
 
-Install dependencies:
-    pip install streamlit pillow deepface transformers torch pytesseract
+The goal is to provide a privacy-first KYC flow where all processing stays
+local to the user's machine.
 """
 
 import streamlit as st
 
+# UI stylesheet helper and application logic helpers.
 from css import get_styles
 from functions import (
     pil_to_b64,
@@ -33,6 +39,7 @@ from PIL import Image
 # ─────────────────────────────────────────────────────────────────────────────
 # PAGE CONFIG
 # ─────────────────────────────────────────────────────────────────────────────
+# Configure the Streamlit page and inject the custom CSS styles.
 st.set_page_config(
     page_title="E-KYC Verification",
     page_icon="🛡️",
@@ -46,6 +53,7 @@ st.markdown(get_styles(), unsafe_allow_html=True)
 # ─────────────────────────────────────────────────────────────────────────────
 # SESSION STATE
 # ─────────────────────────────────────────────────────────────────────────────
+# Initialize the Streamlit session state with application defaults.
 def _init_state():
     defaults = dict(
         step=1,
@@ -70,6 +78,7 @@ S = st.session_state
 # ─────────────────────────────────────────────────────────────────────────────
 # STEP 1 — Document Upload
 # ─────────────────────────────────────────────────────────────────────────────
+# Render the first step where the user uploads an identity document.
 def render_step1():
     col_main, col_info = st.columns([3, 1], gap="large")
 
@@ -134,6 +143,7 @@ def render_step1():
 # ─────────────────────────────────────────────────────────────────────────────
 # STEP 2 — Face Capture
 # ─────────────────────────────────────────────────────────────────────────────
+# Render the second step: capture a live selfie for biometric verification.
 def render_step2():
     col_main, col_preview = st.columns([3, 2], gap="large")
 
@@ -193,6 +203,7 @@ def render_step2():
 # ─────────────────────────────────────────────────────────────────────────────
 # STEP 3 — Verification & Results
 # ─────────────────────────────────────────────────────────────────────────────
+# Perform OCR and face matching, then show the verification outcome.
 def render_step3():
     # ── Run AI pipeline if not yet done ──────────────────────────────────────
     if not S.validated:
@@ -386,6 +397,7 @@ def render_step3():
 # ─────────────────────────────────────────────────────────────────────────────
 # MAIN RENDER LOOP
 # ─────────────────────────────────────────────────────────────────────────────
+# Dispatch the correct UI step based on the current session state.
 render_header()
 render_stepper(S.step)
 
