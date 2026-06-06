@@ -17,7 +17,12 @@ import base64
 import streamlit as st
 from PIL import Image
 import numpy as np
-import cv2
+
+try:
+    import cv2
+    CV2_OK = True
+except ImportError:
+    CV2_OK = False
 
 # ── Optional heavy imports (lazy-loaded to avoid import errors if not installed) ──
 try:
@@ -191,6 +196,8 @@ def _get_embedding(app, pil_img: Image.Image):
     Extract the ArcFace embedding for the largest detected face.
     Returns a numpy vector or None if no face found.
     """
+    if not CV2_OK:
+        raise RuntimeError("opencv-python-headless is not installed.")
     # InsightFace expects BGR numpy array (OpenCV convention)
     bgr = cv2.cvtColor(np.array(pil_img.convert("RGB")), cv2.COLOR_RGB2BGR)
     faces = app.get(bgr)
