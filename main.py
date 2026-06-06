@@ -404,3 +404,33 @@ render_stepper(S.step)
 if   S.step == 1: render_step1()
 elif S.step == 2: render_step2()
 elif S.step == 3: render_step3()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PRESENTATION SUMMARY
+# ─────────────────────────────────────────────────────────────────────────────
+# 1. Top docstring explains the app purpose and tools used.
+# 2. Import Streamlit and helper modules for UI, styling, and image logic.
+# 3. Configure the Streamlit page title, icon, layout, and sidebar state.
+# 4. Inject custom CSS using get_styles() so the app has branded styling.
+# 5. _init_state() sets up shared session state with defaults for steps, images, OCR result, and logs.
+# 6. The step 1 renderer builds the document upload UI:
+#      - upload a file, convert it to PIL, save it in state, and show a preview.
+#      - enable the continue button only after a document is loaded.
+# 7. The step 2 renderer builds the live selfie capture UI:
+#      - capture a camera image, convert and store it, show live preview.
+#      - allow returning to step 1 or moving to verification when a selfie exists.
+# 8. The step 3 renderer runs the validation pipeline only once per session:
+#      - show progress and audit log placeholders.
+#      - extract document fields with OCR and store them.
+#      - compare the uploaded document face with the selfie using AI.
+#      - log results, set validated state, clear progress, and rerun.
+# 9. Step 3 also renders the final results UI:
+#      - verdict banner, document/live photos, audit log, extracted fields, and outcome card.
+#      - provide a reset button to clear state and start a new verification.
+# 10. The main render loop draws the header, stepper, and executes the current step function.
+#
+# Overall, this file creates a 3-step E-KYC experience: document upload, face capture, and local verification.
+
+
+
