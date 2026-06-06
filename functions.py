@@ -4,7 +4,8 @@ functions.py — Core logic and UI render helpers for the E-KYC app.
 AI Stack:
   • OCR / Text Extraction  → Hugging Face TrOCR  (primary)
                              pytesseract           (fallback)
-  • Face Verification      → face-recognition     (dlib, no TensorFlow needed)
+  • Face Verification      → InsightFace (ArcFace) via ONNX — pre-built wheels,
+                             no TensorFlow, no cmake, works on Python 3.14
   • UI Framework           → Streamlit
 """
 
@@ -16,6 +17,7 @@ import base64
 import streamlit as st
 from PIL import Image
 import numpy as np
+import cv2
 
 # ── Optional heavy imports (lazy-loaded to avoid import errors if not installed) ──
 try:
@@ -32,10 +34,11 @@ except ImportError:
     TROCR_OK = False
 
 try:
-    import face_recognition
-    FACE_REC_OK = True
+    import insightface
+    from insightface.app import FaceAnalysis
+    INSIGHTFACE_OK = True
 except ImportError:
-    FACE_REC_OK = False
+    INSIGHTFACE_OK = False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -172,56 +175,81 @@ def extract_document_info(img: Image.Image) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# AI FUNCTION 2 — Face Verification  (face-recognition / dlib)
+# AI FUNCTION 2 — Face Verification  (InsightFace ArcFace via ONNX)
 # ─────────────────────────────────────────────────────────────────────────────
+
+@st.cache_resource(show_spinner=False)
+def _load_face_app():
+    """Load InsightFace ArcFace model once and cache it across sessions."""
+    app = FaceAnalysis(name="buffalo_sc", providers=["CPUExecutionProvider"])
+    app.prepare(ctx_id=0, det_size=(320, 320))
+    return app
+
+
+def _get_embedding(app, pil_img: Image.Image):
+    """
+    Extract the ArcFace embedding for the largest detected face.
+    Returns a numpy vector or None if no face found.
+    """
+    # InsightFace expects BGR numpy array (OpenCV convention)
+    bgr = cv2.cvtColor(np.array(pil_img.convert("RGB")), cv2.COLOR_RGB2BGR)
+    faces = app.get(bgr)
+    if not faces:
+        return None
+    # Pick the face with the largest bounding box area
+    largest = max(faces, key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]))
+    return largest.embedding
+
+
+def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
+    """Cosine similarity in [−1, 1]; 1 = identical direction."""
+    return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-9))
+
 
 def compare_faces(doc_img: Image.Image, live_img: Image.Image) -> dict:
     """
-    Use the face-recognition library (dlib HOG + ResNet) to compare the face
-    in the identity document with the live selfie.
+    Use InsightFace (ArcFace model, ONNX runtime) to compare the face in the
+    identity document with the live selfie.
 
-    face_recognition.face_distance() returns a float in [0, 1]:
-      0.0 = identical  |  0.6 = typical match threshold  |  1.0 = completely different
+    Cosine similarity scale:
+      ≥ 0.40 → match (KYC-grade threshold)
+      < 0.40 → no match
 
-    No TensorFlow / GPU required — pure dlib, works on Python 3.14.
+    Pre-built ONNX wheels: no TensorFlow, no cmake, no dlib compilation.
+    Works on Python 3.14 and Streamlit Cloud out of the box.
     """
-    if not FACE_REC_OK:
+    if not INSIGHTFACE_OK:
         raise RuntimeError(
-            "face-recognition is not installed. Run:\n"
-            "  pip install face-recognition"
+            "insightface is not installed. Run:\n"
+            "  pip install insightface onnxruntime"
         )
 
-    # Convert PIL → numpy RGB arrays (face_recognition expects uint8 RGB)
-    doc_arr  = np.array(doc_img.convert("RGB"))
-    live_arr = np.array(live_img.convert("RGB"))
+    face_app = _load_face_app()
 
-    # Encode faces — returns list of 128-d feature vectors, one per face found
-    doc_encs  = face_recognition.face_encodings(doc_arr)
-    live_encs = face_recognition.face_encodings(live_arr)
+    doc_emb  = _get_embedding(face_app, doc_img)
+    live_emb = _get_embedding(face_app, live_img)
 
-    # Guard: no face detected in one or both images
-    if not doc_encs:
+    if doc_emb is None:
         return {
             "match": False, "confidence": "Low", "similarity_score": 0,
             "reason": "No face detected in the identity document image.",
-            "liveness_note": "face-recognition (dlib HOG detector)",
+            "liveness_note": "InsightFace ArcFace (buffalo_sc · ONNX CPU)",
         }
-    if not live_encs:
+    if live_emb is None:
         return {
             "match": False, "confidence": "Low", "similarity_score": 0,
             "reason": "No face detected in the live selfie.",
-            "liveness_note": "face-recognition (dlib HOG detector)",
+            "liveness_note": "InsightFace ArcFace (buffalo_sc · ONNX CPU)",
         }
 
-    # Compare best (first / largest) face from each image
-    distance   = float(face_recognition.face_distance([doc_encs[0]], live_encs[0])[0])
-    THRESHOLD  = 0.55          # stricter than default 0.6 for KYC use
-    verified   = distance < THRESHOLD
+    THRESHOLD  = 0.40
+    cos_sim    = _cosine_similarity(doc_emb, live_emb)
+    verified   = cos_sim >= THRESHOLD
 
-    # Map distance → 0-100 similarity score (distance=0 → 100, distance≥1 → 0)
-    similarity = max(0, min(100, round((1 - distance) * 100)))
+    # Normalise cosine similarity (−1…1) → score (0…100)
+    similarity = max(0, min(100, round((cos_sim + 1) / 2 * 100)))
 
-    if similarity >= 75:   confidence = "High"
+    if similarity >= 70:   confidence = "High"
     elif similarity >= 55: confidence = "Medium"
     else:                  confidence = "Low"
 
@@ -236,7 +264,7 @@ def compare_faces(doc_img: Image.Image, live_img: Image.Image) -> dict:
         "confidence":       confidence,
         "similarity_score": similarity,
         "reason":           reason,
-        "liveness_note":    f"face-recognition (dlib) · distance: {distance:.3f} · threshold: {THRESHOLD}",
+        "liveness_note":    f"InsightFace ArcFace · cosine: {cos_sim:.3f} · threshold: {THRESHOLD}",
     }
 
 
@@ -248,7 +276,7 @@ def render_header():
     st.markdown("""
     <div class="kyc-header">
         <div class="kyc-header-title">⬡ &nbsp; E-KYC IDENTITY VERIFICATION SYSTEM</div>
-        <div class="kyc-header-badge">🤖 &nbsp; HuggingFace · face-recognition</div>
+        <div class="kyc-header-badge">🤖 &nbsp; HuggingFace · InsightFace</div>
     </div>
     """, unsafe_allow_html=True)
 
