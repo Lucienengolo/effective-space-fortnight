@@ -195,21 +195,69 @@ def _load_face_app():
     return app
 
 
-def _get_embedding(app, pil_img: Image.Image):
+def _get_embedding(app, pil_img: Image.Image, source: str = "unknown"):
     """
     Extract the ArcFace embedding for the largest detected face.
-    Returns a numpy vector or None if no face found.
+    Returns a tuple: (embedding_vector, diagnostics_dict) or (None, diagnostics_dict) if no face found.
+    
+    Diagnostics include:
+      - num_faces: count of faces detected
+      - face_sizes: list of bounding box dimensions
+      - selected_bbox: (x1, y1, x2, y2) of chosen face
+      - selected_size: (width, height) of chosen face
+      - quality_warnings: list of potential issues
     """
     if not CV2_OK:
         raise RuntimeError("opencv-python-headless is not installed.")
+    
+    diagnostics = {
+        "source": source,
+        "num_faces": 0,
+        "face_sizes": [],
+        "selected_bbox": None,
+        "selected_size": None,
+        "quality_warnings": [],
+    }
+    
     # InsightFace expects BGR numpy array (OpenCV convention).
     bgr = cv2.cvtColor(np.array(pil_img.convert("RGB")), cv2.COLOR_RGB2BGR)
+    img_height, img_width = bgr.shape[:2]
     faces = app.get(bgr)
+    
+    diagnostics["num_faces"] = len(faces)
     if not faces:
-        return None
+        diagnostics["quality_warnings"].append("No face detected")
+        return None, diagnostics
+    
+    # Log all detected faces
+    for i, face in enumerate(faces):
+        x1, y1, x2, y2 = face.bbox
+        w, h = x2 - x1, y2 - y1
+        diagnostics["face_sizes"].append((int(w), int(h)))
+    
     # Select the biggest detected face to avoid picking small background faces.
     largest = max(faces, key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]))
-    return largest.embedding
+    x1, y1, x2, y2 = largest.bbox
+    face_w, face_h = int(x2 - x1), int(y2 - y1)
+    
+    diagnostics["selected_bbox"] = (int(x1), int(y1), int(x2), int(y2))
+    diagnostics["selected_size"] = (face_w, face_h)
+    
+    # Quality checks
+    # Warning: face too small (less than 80x80)
+    if face_w < 80 or face_h < 80:
+        diagnostics["quality_warnings"].append(
+            f"Face too small: {face_w}x{face_h}px (ideal ≥80x80). Consider retaking image."
+        )
+    
+    # Warning: face occupies very little of image
+    face_area_ratio = (face_w * face_h) / (img_width * img_height)
+    if face_area_ratio < 0.05:
+        diagnostics["quality_warnings"].append(
+            f"Face occupies only {face_area_ratio*100:.1f}% of image. Zoom in or move closer."
+        )
+    
+    return largest.embedding, diagnostics
 
 
 def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
@@ -217,14 +265,38 @@ def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-9))
 
 
-def compare_faces(doc_img: Image.Image, live_img: Image.Image) -> dict:
+def _normalize_similarity_to_score(cos_sim: float) -> int:
+    """
+    Convert raw cosine similarity [-1, 1] to a user-friendly 0-100 score.
+    
+    Mapping:
+      cos_sim = -1.0 → score = 0    (opposite directions, very different)
+      cos_sim =  0.0 → score = 50   (orthogonal, no relation)
+      cos_sim =  1.0 → score = 100  (identical direction, perfect match)
+    """
+    return int(max(0, min(100, round((cos_sim + 1) / 2 * 100))))
+
+
+def compare_faces(
+    doc_img: Image.Image, live_img: Image.Image,
+    threshold: float = 0.50,
+    show_diagnostics: bool = True
+) -> dict:
     """
     Use InsightFace (ArcFace model, ONNX runtime) to compare the face in the
     identity document with the live selfie.
 
-    Cosine similarity scale:
-      ≥ 0.40 → match (KYC-grade threshold)
-      < 0.40 → no match
+    Args:
+      threshold: cosine similarity threshold [0.0, 1.0]. Tuning guide:
+        - 0.40: lenient (may accept different people, ~60/100 score)
+        - 0.45: balanced (commercial KYC standard, ~65/100 score)
+        - 0.50: strict (recommended for high security, ~70/100 score)
+        - 0.55+: very strict (~75+/100 score)
+      show_diagnostics: include face detection details in output
+
+    Returns:
+      dict with keys: match, confidence, similarity_score, reason, liveness_note,
+      doc_diagnostics, live_diagnostics (if show_diagnostics=True)
 
     Pre-built ONNX wheels: no TensorFlow, no cmake, no dlib compilation.
     Works on Python 3.14 and Streamlit Cloud out of the box.
@@ -237,47 +309,72 @@ def compare_faces(doc_img: Image.Image, live_img: Image.Image) -> dict:
 
     face_app = _load_face_app()
 
-    doc_emb  = _get_embedding(face_app, doc_img)
-    live_emb = _get_embedding(face_app, live_img)
+    doc_emb, doc_diag  = _get_embedding(face_app, doc_img, source="document")
+    live_emb, live_diag = _get_embedding(face_app, live_img, source="live_selfie")
+
+    result = {
+        "match": False, "confidence": "Low", "similarity_score": 0,
+        "raw_cosine": None,
+        "threshold_used": threshold,
+        "reason": "",
+        "liveness_note": "InsightFace ArcFace (buffalo_sc · ONNX CPU)",
+    }
+    
+    if show_diagnostics:
+        result["doc_diagnostics"] = doc_diag
+        result["live_diagnostics"] = live_diag
 
     if doc_emb is None:
-        return {
-            "match": False, "confidence": "Low", "similarity_score": 0,
-            "reason": "No face detected in the identity document image.",
-            "liveness_note": "InsightFace ArcFace (buffalo_sc · ONNX CPU)",
-        }
+        result["reason"] = (
+            "No face detected in the identity document image.\n" +
+            "\n".join(f"  • {w}" for w in doc_diag.get("quality_warnings", []))
+        )
+        return result
+    
     if live_emb is None:
-        return {
-            "match": False, "confidence": "Low", "similarity_score": 0,
-            "reason": "No face detected in the live selfie.",
-            "liveness_note": "InsightFace ArcFace (buffalo_sc · ONNX CPU)",
-        }
+        result["reason"] = (
+            "No face detected in the live selfie.\n" +
+            "\n".join(f"  • {w}" for w in live_diag.get("quality_warnings", []))
+        )
+        return result
 
-    THRESHOLD  = 0.40
     # Cosine similarity range is [-1, 1]. A higher value means closer face embeddings.
-    cos_sim    = _cosine_similarity(doc_emb, live_emb)
-    verified   = cos_sim >= THRESHOLD
+    cos_sim = _cosine_similarity(doc_emb, live_emb)
+    result["raw_cosine"] = round(cos_sim, 4)
+    verified = cos_sim >= threshold
 
     # Normalize cosine similarity (−1…1) → score (0…100) for UI display.
-    similarity = max(0, min(100, round((cos_sim + 1) / 2 * 100)))
+    similarity = _normalize_similarity_to_score(cos_sim)
 
-    if similarity >= 70:   confidence = "High"
-    elif similarity >= 55: confidence = "Medium"
+    # Confidence levels based on normalized score
+    if similarity >= 75:   confidence = "High"
+    elif similarity >= 60: confidence = "Medium"
     else:                  confidence = "Low"
 
-    reason = (
-        f"Facial features match across both images (score {similarity}/100)."
-        if verified else
-        f"Significant facial differences detected (score {similarity}/100)."
-    )
+    # Collect quality warnings from both images
+    all_warnings = doc_diag.get("quality_warnings", []) + live_diag.get("quality_warnings", [])
+    warnings_text = "".join(f"  ⚠️  {w}\n" for w in all_warnings) if all_warnings else ""
 
-    return {
-        "match":            verified,
-        "confidence":       confidence,
+    reason = (
+        f"✓ Facial features match across both images.\n"
+        f"  Similarity: {similarity}/100 (raw cosine: {cos_sim:.4f})"
+        if verified else
+        f"✗ Facial differences detected. Likely a different person.\n"
+        f"  Similarity: {similarity}/100 (raw cosine: {cos_sim:.4f})"
+    )
+    
+    if warnings_text:
+        reason = f"{reason}\n\n{warnings_text}Recommendations:\n  1. Ensure good lighting on both images\n  2. Face should occupy 10-30% of image\n  3. Minimize angles and expressions\n  4. Use clear, high-contrast document photo"
+
+    result.update({
+        "match": verified,
+        "confidence": confidence,
         "similarity_score": similarity,
-        "reason":           reason,
-        "liveness_note":    f"InsightFace ArcFace · cosine: {cos_sim:.3f} · threshold: {THRESHOLD}",
-    }
+        "reason": reason,
+        "liveness_note": f"InsightFace ArcFace · cosine: {cos_sim:.4f} · threshold: {threshold}",
+    })
+
+    return result
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -357,12 +454,16 @@ def render_verdict(match: dict):
     is_match   = match.get("match", False)
     conf       = match.get("confidence", "Low").lower()
     score      = match.get("similarity_score", 0)
-    reason     = match.get("reason", "")
+    raw_cos    = match.get("raw_cosine", None)
+    reason     = match.get("reason", "").replace("\n", "<br>")
     liveness   = match.get("liveness_note", "")
     conf_label = match.get("confidence", "?")
 
+    # Format raw cosine display
+    raw_cos_html = f"<br><span style=\"font-size:0.85rem;color:rgba(255,255,255,0.4)\">Raw cosine: {raw_cos:.4f}</span>" if raw_cos is not None else ""
+    
     liveness_html = (
-        f'<div style="font-size:0.75rem;color:rgba(255,255,255,0.3);margin-top:8px">{liveness}</div>'
+        f'<div style=\"font-size:0.75rem;color:rgba(255,255,255,0.3);margin-top:8px\">{liveness}</div>'
         if liveness else ""
     )
 
@@ -371,10 +472,11 @@ def render_verdict(match: dict):
         <div class="verdict-verified">
             <div class="verdict-icon">✅</div>
             <div class="verdict-title ok">IDENTITY VERIFIED</div>
-            <div class="verdict-reason">{reason}</div>
+            <div class="verdict-reason" style="white-space: pre-wrap; word-wrap: break-word;">{reason}</div>
             <div>
                 <span class="conf-badge conf-{conf}">Confidence: {conf_label}</span>
                 <span class="conf-badge conf-{conf}">Match score: {score}/100</span>
+                {raw_cos_html}
             </div>
             {liveness_html}
         </div>
@@ -384,10 +486,11 @@ def render_verdict(match: dict):
         <div class="verdict-failed">
             <div class="verdict-icon">❌</div>
             <div class="verdict-title fail">VERIFICATION FAILED</div>
-            <div class="verdict-reason">{reason}</div>
+            <div class="verdict-reason" style="white-space: pre-wrap; word-wrap: break-word;">{reason}</div>
             <div>
                 <span class="conf-badge conf-{conf}">Confidence: {conf_label}</span>
                 <span class="conf-badge conf-low">Match score: {score}/100</span>
+                {raw_cos_html}
             </div>
             {liveness_html}
         </div>

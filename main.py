@@ -4,15 +4,16 @@ main.py — E-KYC Identity Verification System
 This app performs on-device identity verification by:
   • extracting text from uploaded identity documents with HuggingFace TrOCR,
   • capturing a live selfie using Streamlit camera input,
-  • comparing the document face and live selfie using DeepFace.
+  • comparing the document face and live selfie using InsightFace ArcFace.
 
 Tools used:
   • Streamlit for UI and camera capture
   • Pillow for image handling
-  • DeepFace for local face matching
+  • InsightFace (ArcFace) for local face matching
   • HuggingFace Transformers (TrOCR) for OCR
   • PyTorch as the ML backend
   • Tesseract OCR support via pytesseract
+  • OpenCV for image processing
 
 The goal is to provide a privacy-first KYC flow where all processing stays
 local to the user's machine.
@@ -126,7 +127,7 @@ def render_step1():
                 </div>
                 <div style="display:flex;gap:10px;align-items:flex-start">
                     <div style="width:26px;height:26px;border-radius:50%;background:rgba(0,200,255,0.2);border:1px solid #00c8ff;display:flex;align-items:center;justify-content:center;color:#00c8ff;font-weight:700;font-size:0.8rem;flex-shrink:0">3</div>
-                    <div style="font-size:0.82rem;color:rgba(255,255,255,0.5);padding-top:4px">HuggingFace reads your document, DeepFace verifies your identity locally.</div>
+                    <div style="font-size:0.82rem;color:rgba(255,255,255,0.5);padding-top:4px">HuggingFace reads your document, InsightFace verifies your identity locally.</div>
                 </div>
             </div>
         </div>
@@ -134,7 +135,7 @@ def render_step1():
             <div class="kyc-card-title" style="font-size:0.85rem">🔐 Privacy Notice</div>
             <div style="font-size:0.75rem;color:rgba(255,255,255,0.35);margin-top:8px;line-height:1.6">
                 All processing is <strong style="color:rgba(255,255,255,0.6)">100% local</strong>.
-                No images are sent to any external server. DeepFace and TrOCR run entirely on your machine.
+                No images are sent to any external server. InsightFace and TrOCR run entirely on your machine.
             </div>
         </div>
         """, unsafe_allow_html=True)
@@ -242,19 +243,22 @@ def render_step3():
             render_log(S)
 
         # ── Stage B: Face Verification ────────────────────────────────────
-        add_log(S, "👤 Running DeepFace biometric comparison (local)…", "#00c8ff")
+        add_log(S, "👤 Running InsightFace biometric comparison (local)…", "#00c8ff")
         with log_ph.container():
             render_log(S)
 
         try:
             with st.spinner("Running biometric face comparison…"):
-                match       = compare_faces(S.doc_pil, S.live_pil)
+                # Use default threshold of 0.50 for strict KYC standard
+                match       = compare_faces(S.doc_pil, S.live_pil, threshold=0.50, show_diagnostics=True)
                 S.face_match = match
             verdict_msg   = "✓ Face match confirmed" if match.get("match") else "✗ Face mismatch detected"
             verdict_color = "#00e5a0" if match.get("match") else "#ff5050"
+            raw_cos = match.get("raw_cosine", None)
+            raw_info = f" · Raw: {raw_cos:.4f}" if raw_cos is not None else ""
             add_log(
                 S,
-                f"{verdict_msg} — Confidence: {match.get('confidence','?')} · Score: {match.get('similarity_score','?')}/100",
+                f"{verdict_msg} — Confidence: {match.get('confidence','?')} · Score: {match.get('similarity_score','?')}/100{raw_info}",
                 verdict_color,
             )
         except RuntimeError as e:
@@ -321,7 +325,79 @@ def render_step3():
         render_log(S)
         st.markdown("</div>", unsafe_allow_html=True)
 
-    with col_right:
+        # Face Detection Diagnostics
+        doc_diag = match.get("doc_diagnostics", {})
+        live_diag = match.get("live_diagnostics", {})
+        if doc_diag or live_diag:
+            st.markdown('<div class="kyc-card">', unsafe_allow_html=True)
+            st.markdown('<div class="kyc-card-title">Face Detection Diagnostics</div>', unsafe_allow_html=True)
+            
+            diag_text = "**Document Face:**\n"
+            if doc_diag:
+                diag_text += f"  • Detected: {doc_diag.get('num_faces', 0)} face(s)\n"
+                if doc_diag.get('selected_size'):
+                    w, h = doc_diag['selected_size']
+                    diag_text += f"  • Selected face size: {w}×{h}px\n"
+                if doc_diag.get('quality_warnings'):
+                    for warning in doc_diag['quality_warnings']:
+                        diag_text += f"  ⚠️ {warning}\n"
+                else:
+                    diag_text += "  ✓ Face quality good\n"
+            
+            diag_text += "\n**Live Selfie:**\n"
+            if live_diag:
+                diag_text += f"  • Detected: {live_diag.get('num_faces', 0)} face(s)\n"
+                if live_diag.get('selected_size'):
+                    w, h = live_diag['selected_size']
+                    diag_text += f"  • Selected face size: {w}×{h}px\n"
+                if live_diag.get('quality_warnings'):
+                    for warning in live_diag['quality_warnings']:
+                        diag_text += f"  ⚠️ {warning}\n"
+                else:
+                    diag_text += "  ✓ Face quality good\n"
+            
+            st.markdown(diag_text)
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        # Threshold Calibration
+        st.markdown('<div class="kyc-card">', unsafe_allow_html=True)
+        st.markdown('<div class="kyc-card-title">Threshold Calibration (Advanced)</div>', unsafe_allow_html=True)
+        st.markdown("""
+        <div style="font-size:0.82rem;color:rgba(255,255,255,0.5);margin-bottom:12px;line-height:1.5">
+        <strong>Adjust threshold to retune matching:</strong><br>
+        • <strong>0.40–0.45:</strong> Lenient (false accepts ~15%, 60/100 score)<br>
+        • <strong>0.45–0.50:</strong> Balanced (false accepts ~5%, 65–70/100 score)<br>
+        • <strong>0.50–0.55:</strong> Strict (false accepts <2%, 70–75/100 score)<br>
+        • <strong>0.55+:</strong> Very strict (high security, may reject valid users)
+        </div>
+        """, unsafe_allow_html=True)
+        
+        current_raw_cos = match.get("raw_cosine", 0.0)
+        new_threshold = st.slider(
+            "Match Threshold (raw cosine similarity)",
+            min_value=0.30,
+            max_value=0.65,
+            value=match.get("threshold_used", 0.50),
+            step=0.01,
+            format="%.2f",
+            key="threshold_calibration",
+            help="Move slider left (lenient) or right (strict) to change match sensitivity"
+        )
+        
+        # Recalculate match with new threshold
+        if new_threshold != match.get("threshold_used", 0.50):
+            rematch_result = current_raw_cos >= new_threshold
+            rematch_score = int(max(0, min(100, round((current_raw_cos + 1) / 2 * 100))))
+            st.markdown(f"""
+            <div style="background:rgba(0,200,255,0.1);border:1px solid rgba(0,200,255,0.3);border-radius:8px;padding:12px;margin-top:8px;font-size:0.82rem">
+            <strong>With threshold {new_threshold:.2f}:</strong><br>
+            Result: <strong>{'✓ MATCH' if rematch_result else '✗ NO MATCH'}</strong><br>
+            Score would be: <strong>{rematch_score}/100</strong> (cosine: {current_raw_cos:.4f})<br>
+            <span style="color:rgba(255,255,255,0.4)">Tip: Rerun verification (Start New Verification) to save new threshold as default.</span>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        st.markdown("</div>", unsafe_allow_html=True)
         # Extracted document fields
         st.markdown("""
         <div class="kyc-card">
@@ -363,7 +439,7 @@ def render_step3():
                             KYC Validation Complete
                         </div>
                         <div style="font-size:0.78rem;color:rgba(255,255,255,0.4);line-height:1.5">
-                            Identity verified locally using DeepFace. Document fields auto-extracted via TrOCR. No data left this device.
+                            Identity verified locally using InsightFace ArcFace. Document fields auto-extracted via TrOCR. No data left this device.
                         </div>
                     </div>
                 </div>
